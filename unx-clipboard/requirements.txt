@@ -1,0 +1,14 @@
+# requirements.txt
+
+PyQt5
+pyperclip
+pynput
+Pillow
+pystray
+mss
+pygetwindow
+requests
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+msal
