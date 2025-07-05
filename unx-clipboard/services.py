@@ -1,13 +1,12 @@
 import os
 import io
 import shutil
-import requests
 import zipfile
 import time
 import json
 import csv
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 
 from PyQt5.QtCore import QTimer
@@ -16,6 +15,28 @@ from PyQt5.QtWidgets import QMessageBox
 from config import (
     USER_DATA_DIR, IMAGES_PATH, DB_PATH, CONFIG_FILE_PATH
 )
+
+# --- SYNC STATE HELPERS ---
+SYNC_STATE_FILE = os.path.join(USER_DATA_DIR, 'sync_state.json')
+
+def get_local_sync_state():
+    """Gets the state of the last successful sync."""
+    try:
+        with open(SYNC_STATE_FILE, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"sync_id": None, "last_sync_time": None}
+
+def save_local_sync_state(sync_id):
+    """Saves the state of the current sync."""
+    state = {
+        "sync_id": sync_id,
+        "last_sync_time": datetime.now(timezone.utc).isoformat()
+    }
+    with open(SYNC_STATE_FILE, 'w') as f:
+        json.dump(state, f, indent=4)
+
+# --- SERVICE CLASSES ---
 
 class ImportExport:
     def __init__(self, db):
@@ -42,7 +63,6 @@ class ImportExport:
                     for root, _, files in os.walk(IMAGES_PATH):
                         for file in files:
                             full_file_path = os.path.join(root, file)
-                            # Add files to an 'images' folder inside the zip
                             zipf.write(full_file_path, os.path.relpath(full_file_path, USER_DATA_DIR))
             self._show_message("Success", f"Full backup created at:\n{file_path}")
         except Exception as e:
@@ -156,15 +176,8 @@ class LocalFolderProvider(BaseSyncProvider):
                 return
 
         print("Local data is newer. Backing up to sync folder.")
-        # Create a temporary backup file first
         importer = ImportExport(self.db)
-        temp_backup_path = os.path.join(USER_DATA_DIR, "temp_backup_for_sync.unxbackup")
-        importer.export_full_backup(temp_backup_path)
-        
-        # Copy the created backup to the sync destination
-        if os.path.exists(temp_backup_path):
-            shutil.copy2(temp_backup_path, destination_file)
-            os.remove(temp_backup_path)
+        importer.export_full_backup(destination_file)
 
 class CloudSync:
     def __init__(self, config, db, gui_parent=None):
