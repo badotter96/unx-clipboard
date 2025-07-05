@@ -4,7 +4,7 @@ import json
 import traceback
 import time
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime
 from threading import Thread
 
 import pyperclip
@@ -16,13 +16,13 @@ import mss.tools
 import pygetwindow as gw
 
 from config import (
-    DB_PATH, THEMES_PATH, IMAGES_PATH, CONFIG_FILE_PATH,
-    USER_DATA_DIR, USER_ICON_PATH, resource_path
+    DB_PATH, THEMES_PATH, IMAGES_PATH, CONFIG_FILE_PATH, 
+    USER_DATA_DIR, USER_ICON_PATH, ICON_SOURCE_PATH
 )
 from core import Communication, Database, ClipboardMonitor
 from ui import AppGUI, SnippingWidget, ScreenshotModeDialog, ImageEditorDialog
 from system import SystemTrayIcon, HotkeyListener, startup_manager
-from services import ImportExport, CloudSync, NotionIntegration, get_local_sync_state
+from services import ImportExport, CloudSync, NotionIntegration
 
 class ClipboardApp:
     def __init__(self):
@@ -79,10 +79,10 @@ class ClipboardApp:
             'save_config': self.save_config,
             'set_startup_status': startup_manager.set_startup_status,
             'open_settings': self.open_settings,
-            'copy_last_item': self.copy_last_item,
-            'open_settings_requested': self.comm.open_settings_requested,
             'start_snipping_tool': self.start_snipping_tool,
-            'restart_app': self.restart_app
+            'restart_app': self.restart_app,
+            'copy_last_item': self.copy_last_item,
+            'open_settings_requested': self.comm.open_settings_requested
         }
 
         self.gui.set_callbacks(app_callbacks)
@@ -97,53 +97,28 @@ class ClipboardApp:
         self.apply_theme()
         
         if self.config.get('sync', {}).get('auto_sync', False):
-            print("Scheduling sync on startup in 15 seconds...")
             QTimer.singleShot(15000, self._trigger_startup_sync)
 
     def _handle_first_run_setup(self):
         os.makedirs(IMAGES_PATH, exist_ok=True)
         os.makedirs(THEMES_PATH, exist_ok=True)
-        if not os.path.exists(CONFIG_FILE_PATH):
-            print("First run detected. Setting up default config.")
-            try:
-                default_config_src = resource_path('config.json')
-                os.makedirs(os.path.dirname(CONFIG_FILE_PATH), exist_ok=True)
-                if os.path.exists(default_config_src):
-                    shutil.copy2(default_config_src, CONFIG_FILE_PATH)
-            except Exception as e: print(f"Error copying default config: {e}")
-        if not os.path.exists(DB_PATH):
-            print("First run: Creating new database.")
-            try:
-                conn = sqlite3.connect(DB_PATH)
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS clipboard (
-                        id INTEGER PRIMARY KEY, content TEXT NOT NULL, type TEXT NOT NULL,
-                        timestamp TIMESTAMP NOT NULL, pinned INTEGER DEFAULT 0, is_snippet INTEGER DEFAULT 0
-                    )""")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_content ON clipboard (content);")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON clipboard (timestamp);")
-                conn.close()
-            except Exception as e: print(f"Error creating database file: {e}")
-        if not os.path.exists(USER_ICON_PATH):
-            print("First run: Copying application icon.")
-            try:
-                default_icon_src = resource_path('icon.ico')
-                if os.path.exists(default_icon_src):
-                    shutil.copy2(default_icon_src, USER_ICON_PATH)
-            except Exception as e: print(f"Error copying icon: {e}")
-        if not os.listdir(THEMES_PATH):
-            print("First run: Copying themes.")
-            try:
-                source_themes_path = resource_path('themes')
-                if os.path.isdir(source_themes_path):
-                    for item in os.listdir(source_themes_path):
-                        s = os.path.join(source_themes_path, item)
-                        d = os.path.join(THEMES_PATH, item)
-                        if os.path.isfile(s):
-                            shutil.copy2(s, d)
-            except Exception as e:
-                print(f"Error copying themes: {e}")
-    
+        
+        files_to_setup = {
+            CONFIG_FILE_PATH: 'config.json',
+            DB_PATH: 'clipboard_history.db',
+            USER_ICON_PATH: 'icon.ico'
+        }
+
+        for dest_path, source_file in files_to_setup.items():
+            if not os.path.exists(dest_path):
+                source_path = resource_path(source_file)
+                if os.path.exists(source_path):
+                    try:
+                        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                        shutil.copy2(source_path, dest_path)
+                    except Exception as e:
+                        print(f"Error setting up {source_file}: {e}")
+        
     def apply_theme(self):
         theme_name = self.config.get("theme", "System").lower()
         stylesheet = ""
@@ -168,7 +143,6 @@ class ClipboardApp:
                 "notion": {"enabled": False, "api_key": "", "database_id": ""}
             }
             if not os.path.exists(CONFIG_FILE_PATH):
-                os.makedirs(os.path.dirname(CONFIG_FILE_PATH), exist_ok=True)
                 with open(CONFIG_FILE_PATH, 'w') as f: json.dump(self.config, f, indent=4)
             
     def save_config(self, config_data):
@@ -187,8 +161,7 @@ class ClipboardApp:
     def manual_sync(self):
         if self.cloud_syncer: self.cloud_syncer.sync()
 
-    def open_settings(self):
-        self.gui.open_settings_dialog()
+    def open_settings(self): self.gui.open_settings_dialog()
     
     def copy_item_to_clipboard(self, entry_id):
         entry = self.db.conn.execute("SELECT content, type FROM clipboard WHERE id=?", (entry_id,)).fetchone()
