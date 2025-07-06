@@ -1,0 +1,9 @@
+PyQt5
+pyperclip
+Pillow
+requests
+pynput
+pystray
+mss
+pygetwindow
+pyinstaller
