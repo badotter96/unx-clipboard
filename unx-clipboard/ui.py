@@ -22,6 +22,146 @@ import mss
 import mss.tools
 from config import USER_DATA_DIR
 
+class ProfileSelectionDialog(QDialog):
+    """A dialog to force the user to select a sync profile on startup."""
+    def __init__(self, available_profiles, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Sync Profile")
+        self.setModal(True) # This dialog must be answered.
+        
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Please select a sync profile for this session:"))
+
+        self.profile_combo = QComboBox()
+        self.profile_combo.addItems(available_profiles)
+        layout.addWidget(self.profile_combo)
+
+        # Only an "OK" button to force a selection.
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        button_box.accepted.connect(self.accept)
+        layout.addWidget(button_box)
+
+        # Prevent the user from closing the dialog without choosing.
+        self.setWindowFlag(Qt.WindowCloseButtonHint, False)
+
+    def get_selected_profile(self):
+        """Returns the backend name, e.g., 'LocalFolder 1'."""
+        return self.profile_combo.currentText()
+
+class ProfileEditDialog(QDialog):
+    """A dialog for adding or editing a single sync profile."""
+    def __init__(self, profile_name="", profile_path="", retention=5, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Sync Profile")
+        
+        layout = QFormLayout(self)
+        
+        self.name_input = QLineEdit(profile_name)
+        self.name_input.setPlaceholderText("e.g., Google Drive Sync")
+        layout.addRow("Profile Name:", self.name_input)
+        
+        path_widget = QWidget()
+        path_layout = QHBoxLayout(path_widget)
+        path_layout.setContentsMargins(0,0,0,0)
+        self.path_input = QLineEdit(profile_path)
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self.browse_for_folder)
+        path_layout.addWidget(self.path_input)
+        path_layout.addWidget(browse_btn)
+        layout.addRow("Sync Path:", path_widget)
+
+        self.retention_spinbox = QSpinBox()
+        self.retention_spinbox.setRange(0, 99)
+        self.retention_spinbox.setValue(retention)
+        layout.addRow("Backups to Keep (0=all):", self.retention_spinbox)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def browse_for_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "Select Sync Folder")
+        if path:
+            self.path_input.setText(path)
+
+    def get_data(self):
+        return {
+            "name": self.name_input.text().strip(),
+            "path": self.path_input.text().strip(),
+            "retention": self.retention_spinbox.value()
+        }
+
+class ProfileManagementDialog(QDialog):
+    """A dialog for managing all sync profiles."""
+    def __init__(self, profiles, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manage Sync Profiles")
+        # Operate on a copy, so changes can be discarded
+        self.profiles = [p.copy() for p in profiles]
+        
+        layout = QVBoxLayout(self)
+        
+        self.list_widget = QListWidget()
+        self.update_list()
+        layout.addWidget(self.list_widget)
+        
+        button_layout = QHBoxLayout()
+        add_btn = QPushButton("Add...")
+        add_btn.clicked.connect(self.add_profile)
+        edit_btn = QPushButton("Edit...")
+        edit_btn.clicked.connect(self.edit_profile)
+        delete_btn = QPushButton("Delete")
+        delete_btn.clicked.connect(self.delete_profile)
+        
+        button_layout.addWidget(add_btn)
+        button_layout.addWidget(edit_btn)
+        button_layout.addWidget(delete_btn)
+        layout.addLayout(button_layout)
+        
+        # Use Ok and Cancel to save or discard changes
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def update_list(self):
+        self.list_widget.clear()
+        for profile in self.profiles:
+            self.list_widget.addItem(f"{profile['name']} ({profile['path']})")
+
+    def add_profile(self):
+        dialog = ProfileEditDialog(parent=self)
+        if dialog.exec_() == QDialog.Accepted:
+            data = dialog.get_data()
+            if data['name'] and data['path']:
+                self.profiles.append(data)
+                self.update_list()
+
+    def edit_profile(self):
+        current_row = self.list_widget.currentRow()
+        if current_row < 0: return
+        
+        profile = self.profiles[current_row]
+        dialog = ProfileEditDialog(profile['name'], profile['path'], profile['retention'], self)
+        if dialog.exec_() == QDialog.Accepted:
+            data = dialog.get_data()
+            if data['name'] and data['path']:
+                self.profiles[current_row] = data
+                self.update_list()
+
+    def delete_profile(self):
+        current_row = self.list_widget.currentRow()
+        if current_row < 0: return
+        
+        reply = QMessageBox.question(self, 'Confirm Delete', "Are you sure you want to delete this profile?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            del self.profiles[current_row]
+            self.update_list()
+
+    def get_profiles(self):
+        return self.profiles
+
 class AuthDialog(QDialog):
     def __init__(self, auth_url, parent=None):
         super().__init__(parent)
@@ -168,46 +308,33 @@ class SettingsDialog(QDialog):
         # --- Cloud Sync Settings ---
         sync_group = QGroupBox("Cloud Sync")
         self.sync_layout = QFormLayout()
-        
-        # New "Last Sync" Label
+
         self.last_sync_label = QLabel("Never")
         self._update_last_sync_label()
         self.sync_layout.addRow("Last Successful Sync:", self.last_sync_label)
         
+        # Display the active profile for the current session as a read-only label
+        active_profile_name = self.config.get('sync', {}).get('backend', 'None')
+        active_profile_label = QLabel(f"<b>{active_profile_name}</b>")
+        active_profile_label.setToolTip("The active profile is selected when the application starts.")
+        self.sync_layout.addRow("Active Session Profile:", active_profile_label)
+        
         self.auto_sync = QCheckBox()
-        self.auto_sync.setChecked(self.config['sync']['auto_sync'])
+        self.auto_sync.setChecked(self.config.get('sync', {}).get('auto_sync', False))
         self.sync_layout.addRow("Enable Auto-Sync:", self.auto_sync)
         
         self.sync_interval = QSpinBox()
         self.sync_interval.setRange(1, 1440)
-        self.sync_interval.setValue(self.config['sync'].get('sync_interval_minutes', 15))
+        self.sync_interval.setValue(self.config.get('sync', {}).get('sync_interval_minutes', 15))
         self.sync_layout.addRow("Auto-Sync Interval (minutes):", self.sync_interval)
         
-        self.backup_retention = QSpinBox()
-        self.backup_retention.setRange(0, 99)
-        self.backup_retention.setToolTip("The number of recent backup files to keep. Set to 0 to disable.")
-        self.backup_retention.setValue(self.config.get('sync', {}).get('backup_retention_count', 5))
-        self.sync_layout.addRow("Backups to Keep (0=all):", self.backup_retention)
-        
-        self.sync_backend = QComboBox()
-        self.sync_backend.addItems(["None", "LocalFolder"])
-        self.sync_backend.setCurrentText(self.config['sync'].get('backend', 'None'))
-        self.sync_backend.currentTextChanged.connect(self.update_sync_fields_visibility)
-        self.sync_layout.addRow("Sync Backend:", self.sync_backend)
-        
-        self.local_sync_path_widget = QWidget()
-        local_layout = QHBoxLayout(self.local_sync_path_widget)
-        local_layout.setContentsMargins(0,0,0,0)
-        self.local_sync_path_input = QLineEdit(self.config['sync'].get('local_sync_path', ''))
-        browse_btn = QPushButton("Browse...")
-        browse_btn.clicked.connect(self.browse_for_folder)
-        local_layout.addWidget(self.local_sync_path_input)
-        local_layout.addWidget(browse_btn)
-        self.sync_layout.addRow("Local Sync Path:", self.local_sync_path_widget)
-        
+        # The only button needed is the one to manage profiles
+        manage_profiles_btn = QPushButton("Manage Sync Profiles...")
+        manage_profiles_btn.clicked.connect(self.open_profile_manager)
+        self.sync_layout.addRow(manage_profiles_btn)
+
         sync_group.setLayout(self.sync_layout)
         layout.addWidget(sync_group)
-        self.update_sync_fields_visibility(self.sync_backend.currentText())
 
         # --- Discord Integration Settings ---
         discord_group = QGroupBox("Discord Integration")
@@ -224,6 +351,9 @@ class SettingsDialog(QDialog):
         self.discord_image_thread_input = QLineEdit(self.config.get('discord', {}).get('image_thread_id', ''))
         self.discord_image_thread_input.setPlaceholderText("Enter the ID for the image thread")
         discord_layout.addRow("Image Thread ID:", self.discord_image_thread_input)
+        self.discord_snippet_thread_input = QLineEdit(self.config.get('discord', {}).get('snippet_thread_id', ''))
+        self.discord_snippet_thread_input.setPlaceholderText("Enter the ID for the snippet thread")
+        discord_layout.addRow("Snippet Thread ID:", self.discord_snippet_thread_input)
         discord_group.setLayout(discord_layout)
         layout.addWidget(discord_group)
 
@@ -234,7 +364,6 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.button_box)
 
     def _update_last_sync_label(self):
-        """Reads the sync info file and updates the label text."""
         try:
             state_file = os.path.join(USER_DATA_DIR, 'last_sync_info.json')
             if os.path.exists(state_file):
@@ -259,22 +388,43 @@ class SettingsDialog(QDialog):
         self.sync_layout.labelForField(self.local_sync_path_widget).setVisible(is_local_folder)
         self.local_sync_path_widget.setVisible(is_local_folder)
 
+    def open_profile_manager(self):
+        profiles = self.config.get('sync', {}).get('profiles', [])
+        dialog = ProfileManagementDialog(profiles, self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.config['sync']['profiles'] = dialog.get_profiles()
+            # After managing profiles, we immediately save the config
+            self.app_callbacks['save_config'](self.config)
+            QMessageBox.information(self, "Profiles Saved", "Sync profiles have been updated. Please restart the application to select a new active profile.")
+
+    def populate_backend_selector(self):
+        self.sync_backend.clear()
+        self.sync_backend.addItem("None")
+        profiles = self.config.get('sync', {}).get('profiles', [])
+        for profile in profiles:
+            self.sync_backend.addItem(profile['name'])
+
     def save_and_close(self):
+        sync_settings = self.config.get('sync', {})
+        sync_settings['auto_sync'] = self.auto_sync.isChecked()
+        sync_settings['sync_interval_minutes'] = self.sync_interval.value()
+
         self.app_callbacks['set_startup_status'](self.startup_cb.isChecked())
         self.config['theme'] = self.theme_selector.currentText()
         self.config['history']['retention_days'] = self.retention_days.value()
         self.config['history']['log_images'] = self.log_images_cb.isChecked()
-        self.config['sync']['auto_sync'] = self.auto_sync.isChecked()
-        self.config['sync']['sync_interval_minutes'] = self.sync_interval.value()
-        self.config['sync']['backup_retention_count'] = self.backup_retention.value()
-        self.config['sync']['backend'] = self.sync_backend.currentText()
-        self.config['sync']['local_sync_path'] = self.local_sync_path_input.text()
+        #self.config['sync']['auto_sync'] = self.auto_sync.isChecked()
+        #self.config['sync']['sync_interval_minutes'] = self.sync_interval.value()
+        #self.config['sync']['backup_retention_count'] = self.backup_retention.value()
+        #self.config['sync']['backend'] = self.sync_backend.currentText()
+        #self.config['sync']['local_sync_path'] = self.local_sync_path_input.text()
         if 'discord' not in self.config:
             self.config['discord'] = {}
         self.config['discord']['enabled'] = self.discord_enabled_cb.isChecked()
         self.config['discord']['webhook_url'] = self.discord_webhook_input.text()
         self.config['discord']['text_thread_id'] = self.discord_text_thread_input.text()
         self.config['discord']['image_thread_id'] = self.discord_image_thread_input.text()
+        self.config['discord']['snippet_thread_id'] = self.discord_snippet_thread_input.text()
         self.app_callbacks['save_config'](self.config)
         self.accept()
 
@@ -287,6 +437,38 @@ class SettingsDialog(QDialog):
         path = QFileDialog.getExistingDirectory(self, "Select Sync Folder")
         if path:
             self.local_sync_path_input.setText(path)
+
+class NewSnippetDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("New Key-Value Snippet")
+        self.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(self)
+        form_layout = QFormLayout()
+
+        self.key_input = QLineEdit()
+        self.key_input.setPlaceholderText("e.g., Email Signature")
+        form_layout.addRow("Key (What you'll see in the list):", self.key_input)
+
+        self.value_input = QTextEdit()
+        self.value_input.setPlaceholderText("The full text content of the snippet.")
+        form_layout.addRow("Value (The content to be copied):", self.value_input)
+
+        layout.addLayout(form_layout)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def get_data(self):
+        """Returns the key and value entered by the user."""
+        key = self.key_input.text().strip()
+        value = self.value_input.toPlainText().strip()
+        if key and value:
+            return key, value
+        return None, None
 
 class SurfingWidget(QWidget):
     def __init__(self, parent=None):
@@ -475,7 +657,7 @@ class SnippingWidget(QWidget):
         screen_geo = QApplication.instance().primaryScreen().geometry()
         monitor = {"top": rect.top() + screen_geo.top(), "left": rect.left() + screen_geo.left(), "width": rect.width(), "height": rect.height()}
         
-        relative_path = os.path.join("images", f"ss_{int(time.time() * 1000)}.png")
+        relative_path = os.path.join("images", f"unxss-region-{int(time.time() * 1000)}.png")
         
         full_path = os.path.join(USER_DATA_DIR, relative_path)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -815,8 +997,6 @@ class AppGUI(QMainWindow):
         self.db = db
         self.app_callbacks = {}
         self.importer_exporter = None
-        self.notion_is_configured = False
-        self.settings_dialog = None
         
         self.setWindowTitle("UNX Clipboard")
         self.setGeometry(100, 100, 700, 800)
@@ -829,18 +1009,18 @@ class AppGUI(QMainWindow):
         
     def set_callbacks(self, callbacks):
         self.app_callbacks = callbacks
-        self.importer_exporter = self.app_callbacks['importer_exporter']
-        self.notion_is_configured = self.app_callbacks['notion_is_configured']()
+        self.importer_exporter = self.app_callbacks.get('importer_exporter')
         self.create_menu()
         self.populate_all_lists()
-        self.password_widget.copy_callback = self.app_callbacks['copy_and_log_text']
-        self.snipping_widget_button.clicked.connect(self.app_callbacks['start_snipping_tool'])
+        if hasattr(self, 'password_widget'):
+            self.password_widget.copy_callback = self.app_callbacks.get('copy_and_log_text')
+        if hasattr(self, 'snipping_widget_button'):
+            self.snipping_widget_button.clicked.connect(self.app_callbacks.get('start_snipping_tool'))
 
     def create_menu(self):
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu('&File')
         
-        # --- Simplified Menu ---
         backup_action = QAction('Create Full Backup...', self)
         backup_action.triggered.connect(self.create_full_backup)
         file_menu.addAction(backup_action)
@@ -851,13 +1031,12 @@ class AppGUI(QMainWindow):
         
         file_menu.addSeparator()
         exit_action = QAction('&Exit', self)
-        exit_action.triggered.connect(self.app_callbacks['exit'])
+        exit_action.triggered.connect(self.app_callbacks.get('exit'))
         file_menu.addAction(exit_action)
         
-        # --- Other Menus ---
         sync_menu = menu_bar.addMenu('&Sync')
         manual_sync = QAction('Run Manual Sync', self)
-        manual_sync.triggered.connect(self.app_callbacks['manual_sync'])
+        manual_sync.triggered.connect(self.app_callbacks.get('manual_sync'))
         sync_menu.addAction(manual_sync)
         
         settings_menu = menu_bar.addMenu('&Settings')
@@ -874,13 +1053,16 @@ class AppGUI(QMainWindow):
         QMessageBox.about(self, "About UNX Clipboard", "<h3>UNX Clipboard</h3><p>A powerful, feature-rich clipboard manager.</p>")
         
     def open_settings_dialog(self):
-        self.settings_dialog = SettingsDialog(self.app_callbacks['get_config'](), self.app_callbacks, self)
-        self.settings_dialog.exec_()
+        config_data = self.app_callbacks.get('get_config', lambda: {})()
+        dialog = SettingsDialog(config_data, self.app_callbacks, self)
+        dialog.exec_()
         
     def open_new_snippet_dialog(self):
-        text, ok = QInputDialog.getMultiLineText(self, "New Snippet", "Enter text:")
-        if ok and text:
-            self.app_callbacks['add_new_snippet'](text)
+        dialog = NewSnippetDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            key, value = dialog.get_data()
+            if key and value:
+                self.app_callbacks.get('add_new_snippet')(key, value)
             
     def create_snipping_widget(self):
         return SnippingWidget(self)
@@ -892,24 +1074,22 @@ class AppGUI(QMainWindow):
         return ImageEditorDialog(image_path, self)
         
     def create_full_backup(self):
-        filepath, _ = QFileDialog.getSaveFileName(self, "Create Full Backup", "", "UNX Backup Files (*.unxbackup)")
+        filepath, _ = QFileDialog.getSaveFileName(self, "Create Full Backup", "", "UNX Backup Files (*.zip *.unxbackup)")
         if filepath:
-            self.app_callbacks['importer_exporter'].export_full_backup(filepath)
+            self.app_callbacks.get('importer_exporter').export_full_backup(filepath)
             
     def restore_from_backup(self):
-        filepath, _ = QFileDialog.getOpenFileName(self, "Restore from Backup", "", "UNX Backup Files (*.unxbackup *.zip)")
+        filepath, _ = QFileDialog.getOpenFileName(self, "Restore from Backup", "", "UNX Backup Files (*.zip *.unxbackup)")
         if filepath:
-            if self.app_callbacks['importer_exporter'].import_full_backup(filepath):
-                self.app_callbacks['restart_app']()
+            if self.app_callbacks.get('importer_exporter').import_full_backup(filepath):
+                self.app_callbacks.get('restart_app')()
     
     def update_pagination_controls(self):
-        """Updates the page label and enables/disables the prev/next buttons."""
         self.page_label.setText(f"Page {self.current_page} / {self.total_pages}")
         self.prev_page_button.setEnabled(self.current_page > 1)
         self.next_page_button.setEnabled(self.current_page < self.total_pages)
 
     def on_search_changed(self):
-        """Resets to the first page whenever the search text changes."""
         self.current_page = 1
         self.populate_all_lists()
 
@@ -1029,8 +1209,6 @@ class AppGUI(QMainWindow):
         self.preview_text.hide()
         main_splitter.addWidget(bottom_pane)
         main_splitter.setSizes([500, 300])
-        main_splitter.setHandleWidth(10)
-        main_splitter.setChildrenCollapsible(False)
         
         self.main_tabs.currentChanged.connect(self.on_main_tab_changed)
         self.on_main_tab_changed(0) 
@@ -1041,9 +1219,7 @@ class AppGUI(QMainWindow):
             self.screenshot_preview_label.setText("Could not load preview.")
         else:
             scaled_pixmap = pixmap.scaled(
-                self.screenshot_preview_label.size(), 
-                Qt.KeepAspectRatio, 
-                Qt.SmoothTransformation
+                self.screenshot_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
             )
             self.screenshot_preview_label.setPixmap(scaled_pixmap)
 
@@ -1052,30 +1228,29 @@ class AppGUI(QMainWindow):
         self.search_input.setVisible(is_clipboard_tab)
         self.action_buttons_widget.setVisible(is_clipboard_tab)
         self.tabs.setVisible(is_clipboard_tab)
-        self.main_tabs.parent().parent().widget(1).setVisible(is_clipboard_tab)
+        main_splitter = self.centralWidget().layout().itemAt(1).widget()
+        if main_splitter:
+            main_splitter.widget(1).setVisible(is_clipboard_tab)
         
-        surfing_widget_index = -1
-        for i in range(self.main_tabs.count()):
-            if isinstance(self.main_tabs.widget(i), SurfingWidget):
-                surfing_widget_index = i
-                break
-        
-        if surfing_widget_index != -1:
-            if index == surfing_widget_index:
-                self.surfing_widget.wake_browser()
-            else:
-                self.surfing_widget.hibernation_timer.start(60000)
+        is_surfing_tab = self.main_tabs.tabText(index) == "Surfing"
+        if is_surfing_tab:
+            self.surfing_widget.wake_browser()
+        else:
+            self.surfing_widget.hibernation_timer.start(60000)
 
     def get_current_list_widget(self):
-        return self.tabs.widget(self.tabs.currentIndex())
+        return self.tabs.currentWidget()
 
     def show_item_context_menu(self, position):
         active_list_widget = self.get_current_list_widget()
         if not active_list_widget: return
-        item = active_list_widget.itemAt(position)
-        if not item: return
-        
-        entry_id = item.data(Qt.UserRole)
+        item_under_cursor = active_list_widget.itemAt(position)
+        if not item_under_cursor: return
+
+        active_list_widget.setCurrentItem(item_under_cursor)
+        self.on_item_select(item_under_cursor)
+
+        entry_id = item_under_cursor.data(Qt.UserRole)
         entry = self.db.conn.execute("SELECT type, is_snippet FROM clipboard WHERE id = ?", (entry_id,)).fetchone()
         if not entry: return
         
@@ -1083,14 +1258,16 @@ class AppGUI(QMainWindow):
         
         context_menu = QMenu(self)
         copy_action = context_menu.addAction("Copy Content")
-        
         edit_action = None
         if content_type == 'image':
             edit_action = context_menu.addAction("Edit Image")
 
         pin_action = context_menu.addAction("Pin/Unpin Item")
-        snippet_text = "Remove from Snippets" if is_a_snippet else "Add to Snippets"
-        snippet_action = context_menu.addAction(snippet_text)
+        
+        if is_a_snippet:
+            snippet_action = context_menu.addAction("Remove from Snippets")
+        else:
+            snippet_action = context_menu.addAction("Add to Snippets...")
         
         context_menu.addSeparator()
         delete_action = context_menu.addAction("Delete Item")
@@ -1101,8 +1278,12 @@ class AppGUI(QMainWindow):
         elif action == edit_action: self.app_callbacks['edit_image'](entry_id)
         elif action == pin_action: self.app_callbacks['pin'](entry_id)
         elif action == snippet_action:
-            if is_a_snippet: self.app_callbacks['remove_from_snippet'](entry_id)
-            else: self.app_callbacks['set_as_snippet'](entry_id)
+            if is_a_snippet:
+                self.app_callbacks['remove_from_snippet'](entry_id)
+            else:
+                key, ok = QInputDialog.getText(self, "Add to Snippets", "Enter a key for this snippet:")
+                if ok and key:
+                    self.app_callbacks['set_as_snippet'](entry_id, key)
         elif action == delete_action: self.app_callbacks['delete'](entry_id)
 
     def populate_all_lists(self):
@@ -1111,28 +1292,32 @@ class AppGUI(QMainWindow):
         
         search_text = self.search_input.text()
         
-        # First, get the total count of items that match the search
         total_items = self.db.get_total_entry_count(search_text=search_text)
-        if total_items == 0:
-            self.total_pages = 1 # At least one page, even if empty
-        else:
-            self.total_pages = math.ceil(total_items / self.items_per_page)
+        self.total_pages = math.ceil(total_items / self.items_per_page) or 1
 
-        # Now, get only the items for the current page
         all_entries = self.db.get_all_entries(
             search_text=search_text, 
             page=self.current_page, 
             per_page=self.items_per_page
         )
         
-        for entry_id, content, content_type, timestamp, pinned, is_snippet in all_entries:
-            pin_char = "📌" if pinned else " "; snippet_char = "🔖" if is_snippet else ""
-            display_text = content.replace('\n', ' ').strip()
-            if len(display_text) > 60: display_text = display_text[:57] + "..."
-            list_item_text = f"{pin_char}{snippet_char} [{timestamp.strftime('%Y-%m-%d %H:%M:%S')}] {display_text}"
-            all_item = QListWidgetItem(list_item_text); all_item.setData(Qt.UserRole, entry_id)
+        for entry_id, content, content_type, timestamp, pinned, is_snippet, snippet_key in all_entries:
+            pin_char = "📌" if pinned else " "
             
-            # This logic remains the same, but now only shows one page of items
+            if is_snippet:
+                display_text = snippet_key or ""
+                snippet_char = "🔖"
+            else:
+                display_text = (content or "").replace('\n', ' ').strip()
+                snippet_char = ""
+
+            if len(display_text) > 60: display_text = display_text[:57] + "..."
+            
+            list_item_text = f"{pin_char}{snippet_char} [{timestamp.strftime('%Y-%m-%d %H:%M:%S')}] {display_text}"
+            
+            all_item = QListWidgetItem(list_item_text)
+            all_item.setData(Qt.UserRole, entry_id)
+            
             self.list_widgets["All"].addItem(all_item)
             if content_type == 'text': self.list_widgets["Text"].addItem(all_item.clone())
             elif content_type == 'image': self.list_widgets["Images"].addItem(all_item.clone())
@@ -1142,39 +1327,45 @@ class AppGUI(QMainWindow):
         self.update_pagination_controls()
 
     def on_item_select(self, current_item, previous_item=None):
-        if not current_item:
-            self.preview_text.hide()
-            self.preview_label.setText("Select a clipboard item to see a preview")
-            self.preview_label.show()
-            return
+        self.preview_text.hide()
+        self.preview_label.setPixmap(QPixmap())
+        self.preview_label.setText("Select a clipboard item to see a preview")
+        self.preview_label.show()
+
+        if not current_item: return
+            
         entry_id = current_item.data(Qt.UserRole)
         entry = self.db.conn.execute("SELECT content, type FROM clipboard WHERE id = ?", (entry_id,)).fetchone()
-        if not entry:
-            return
+        if not entry: return
+        
         content, content_type = entry
-        self.preview_text.hide()
-        self.preview_label.show()
-        if content_type == 'text':
-            self.preview_label.hide()
-            self.preview_text.setText(content)
-            self.preview_text.show()
-        elif content_type == 'image':
+        
+        if content and isinstance(content, str) and os.path.basename(content).startswith('unxss-'):
+            self.preview_text.hide()
             full_path = os.path.join(USER_DATA_DIR, content)
             pixmap = QPixmap(full_path)
             if pixmap.isNull():
                 self.preview_label.setText(f"Image not found:\n{content}")
             else:
+                self.preview_label.setText("")
                 scaled_pixmap = pixmap.scaled(self.preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self.preview_label.setPixmap(scaled_pixmap)
+            self.preview_label.show()
+        else:
+            self.preview_label.hide()
+            self.preview_text.setText(content or "")
+            self.preview_text.show()
                 
     def perform_action_on_selected(self, action_name):
         active_list_widget = self.get_current_list_widget()
+        if not active_list_widget: return
+        
         item = active_list_widget.currentItem()
-        if not item:
-            return
+        if not item: return
+
         entry_id = item.data(Qt.UserRole)
         if entry_id:
-            self.app_callbacks[action_name](entry_id)
+            self.app_callbacks.get(action_name)(entry_id)
             
     def refresh_list(self):
         self.populate_all_lists()

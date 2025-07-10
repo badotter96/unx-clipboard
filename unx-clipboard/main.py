@@ -10,7 +10,7 @@ from threading import Thread
 import pyperclip
 from PyQt5.QtWidgets import QApplication, QMessageBox, QDialog
 from PyQt5.QtCore import QTimer, QProcess, Qt, pyqtSignal
-from PyQt5.QtGui import QImage
+from PyQt5.QtGui import QImage, QIcon
 import mss
 import mss.tools
 import pygetwindow as gw
@@ -19,7 +19,7 @@ from config import (
     DB_PATH, THEMES_PATH, IMAGES_PATH, CONFIG_FILE_PATH,
     USER_DATA_DIR, USER_ICON_PATH, resource_path
 )
-from core import Communication, Database # Remove ClipboardMonitor from here
+from core import Communication, Database, ClipboardMonitor # Remove ClipboardMonitor from here
 from ui import AppGUI
 from system import SystemTrayIcon, HotkeyListener, startup_manager
 from services import ImportExport, CloudSync, NotionIntegration, DiscordIntegration, get_local_sync_state, SyncSignals
@@ -27,79 +27,77 @@ from services import ImportExport, CloudSync, NotionIntegration, DiscordIntegrat
 class ClipboardApp:
     def __init__(self):
         self._handle_first_run_setup()
+        
         self.is_restarting = False
         self.qt_app = QApplication(sys.argv)
         self.qt_app.setQuitOnLastWindowClosed(False)
-        self.sync_signals = SyncSignals()
 
+        # 1. Initialize core components
         self.comm = Communication()
-        self.comm.hotkey_triggered.connect(self.toggle_window)
-        self.comm.open_settings_requested.connect(self.open_settings)
-        self.comm.snipping_tool_triggered.connect(self.start_snipping_tool)
-        
+        self.sync_signals = SyncSignals()
         self.load_config()
-        
         self.db = Database(DB_PATH, self.config)
+        self.gui = AppGUI(self.db, USER_ICON_PATH)
+
+        # 2. Connect signals now that GUI exists
+        self.comm.history_cleared.connect(self.gui.refresh_list)
+        self.comm.screenshot_taken_for_preview.connect(self.gui.update_screenshot_preview)
+        
+        # 3. Prompt for profile, which may trigger a reload
+        self._prompt_for_sync_profile()
+
+        # 4. Initialize all remaining components
         self.importer_exporter = ImportExport(self.db)
         self.notion_integrator = NotionIntegration(self.config)
         self.discord_integrator = DiscordIntegration(self.config)
-        from core import ClipboardMonitor
+        
         self.monitor = ClipboardMonitor(self.config, IMAGES_PATH)
         self.monitor.new_entry.connect(self._on_new_entry)
         
         self.clipboard_timer = QTimer(self.qt_app)
         self.clipboard_timer.timeout.connect(self.monitor.check_clipboard)
         
+        # This is where the hotkeys are initialized. The corrected order ensures this always runs.
         hotkey_string = self.config.get('hotkey', '<ctrl>+<shift>+v')
         self.hotkey_listener = HotkeyListener(hotkey_string, self.comm.hotkey_triggered.emit)
         
         snipping_hotkey_string = self.config.get('snipping_hotkey', '<ctrl>+<shift>+s')
         self.snipping_hotkey_listener = HotkeyListener(snipping_hotkey_string, self.comm.snipping_tool_triggered.emit)
         
-        self.gui = AppGUI(self.db, USER_ICON_PATH)
         self.cloud_syncer = CloudSync(self.config, self.db, self.sync_signals)
 
         try:
             from PIL import Image
             tray_icon_image = Image.open(USER_ICON_PATH)
         except Exception as e:
-            print(f"Could not load tray icon image: {e}")
             tray_icon_image = None
-
+            print(f"Could not load tray icon image: {e}")
+            
         app_callbacks = {
             'pin': self.pin_entry, 'delete': self.delete_entry,
             'set_as_snippet': self.set_as_snippet, 'remove_from_snippet': self.remove_from_snippet,
             'add_new_snippet': self.add_new_snippet, 'copy_and_log_text': self.copy_and_log_text,
-            'copy_item_to_clipboard': self.copy_item_to_clipboard,
-            'edit_image': self.edit_image,
+            'copy_item_to_clipboard': self.copy_item_to_clipboard, 'edit_image': self.edit_image,
             'toggle_window': self.toggle_window, 'exit': self.shutdown,
-            'importer_exporter': self.importer_exporter,
-            'manual_sync': self.manual_sync, 'log_in_to_cloud': self.log_in_to_cloud,
-            'log_out_from_cloud': self.log_out_from_cloud,
-            'is_cloud_logged_in': self.is_cloud_logged_in,
-            'clear_history': self.clear_history,
-            'send_to_notion': self.send_to_notion,
+            'importer_exporter': self.importer_exporter, 'manual_sync': self.manual_sync,
+            'clear_history': self.clear_history, 'send_to_notion': self.send_to_notion,
             'notion_is_configured': self.notion_integrator.is_configured,
             'get_config': lambda: self.config, 'save_config': self.save_config,
             'set_startup_status': startup_manager.set_startup_status,
             'open_settings': self.open_settings, 'copy_last_item': self.copy_last_item,
-            'open_settings_requested': self.comm.open_settings_requested,
-            'start_snipping_tool': self.start_snipping_tool,
-            'restart_app': self.restart_app
+            'start_snipping_tool': self.start_snipping_tool, 'restart_app': self.restart_app
         }
 
         self.gui.set_callbacks(app_callbacks)
         self.tray = SystemTrayIcon(app_callbacks, tray_icon_image)
         self.importer_exporter.parent = self.gui
         
-        self.comm.new_entry_detected.connect(self.gui.refresh_list)
-        self.comm.screenshot_taken_for_preview.connect(self.gui.update_screenshot_preview)
-        self.sync_signals.sync_complete.connect(self._on_sync_complete, Qt.QueuedConnection)
-        self.comm.history_cleared.connect(self.gui.refresh_list)
-        
         self.setup_auto_sync_timer()
-        
         self.apply_theme()
+        
+        if self.config.get('sync', {}).get('auto_sync', False):
+            print("Scheduling sync on startup...")
+            QTimer.singleShot(5000, self.manual_sync)
         
         # A wrapper function for the startup thread
         def startup_sync():
@@ -113,6 +111,39 @@ class ClipboardApp:
         # Perform a sync check on startup in a separate thread
         if self.config.get('sync', {}).get('auto_sync', False):
             Thread(target=startup_sync, daemon=True).start()
+
+    def _prompt_for_sync_profile(self):
+        """
+        If configured profiles exist, forces the user to select one for the session.
+        """
+        sync_config = self.config.get('sync', {})
+        profiles = sync_config.get('profiles', [])
+        
+        available_profile_names = [p['name'] for p in profiles if p.get('path')]
+        
+        # If there are no configured profiles, just set the backend to "None" and continue.
+        if not available_profile_names:
+            self.config['sync']['backend'] = "None"
+            return
+
+        # If profiles exist, show the selection dialog.
+        from ui import ProfileSelectionDialog
+        dialog = ProfileSelectionDialog(available_profile_names)
+        
+        # --- NEW: Add the application icon to the dialog ---
+        if os.path.exists(USER_ICON_PATH):
+            dialog.setWindowIcon(QIcon(USER_ICON_PATH))
+        
+        if dialog.exec_() == QDialog.Accepted:
+            selected_profile = dialog.get_selected_profile()
+            self.config['sync']['backend'] = selected_profile
+            # We call save_config which handles writing to the file and reloading.
+            self.save_config(self.config) 
+            print(f"Active sync profile for this session set to: {selected_profile}")
+        else:
+            # This case should ideally not be reachable due to the dialog's design.
+            self.config['sync']['backend'] = "None"
+            print("No sync profile selected. Defaulting to 'None'.")
 
     def edit_image(self, entry_id):
         """Opens the image editor for an existing image entry."""
@@ -229,7 +260,7 @@ class ClipboardApp:
         # A wrapper to call sync in a thread from the UI
         def do_sync():
             if self.cloud_syncer:
-                self.cloud_syncer.sync()
+                self.cloud_syncer.sync(force_upload=True)
         Thread(target=do_sync, daemon=True).start()
 
     def log_in_to_cloud(self):
@@ -292,13 +323,29 @@ class ClipboardApp:
         self.db.remove_from_snippet(entry_id)
         self.gui.refresh_list()
 
-    def add_new_snippet(self, content):
-        self.db.add_manual_snippet(content)
+    def add_new_snippet(self, key, value):
+        """Calls the database method to add a new key-value snippet."""
+        self.db.add_manual_snippet(key, value)
+        self.gui.refresh_list()
+        Thread(target=self.discord_integrator.send_snippet_to_discord, args=(key, value), daemon=True).start()
+        
+    def set_as_snippet(self, entry_id, key):
+        """Sets an item as a snippet, saves it to the DB, and sends it to Discord."""
+        # First, we need to get the content (the value) of the item
+        # to determine if it's text or an image path.
+        entry = self.db.conn.execute("SELECT content FROM clipboard WHERE id = ?", (entry_id,)).fetchone()
+        if not entry:
+            return
+
+        value = entry[0]
+        
+        # Now, update the database with the new key
+        self.db.set_as_snippet(entry_id, key)
         self.gui.refresh_list()
         
-    def set_as_snippet(self, entry_id):
-        self.db.set_as_snippet(entry_id)
-        self.gui.refresh_list()
+        # Finally, send the correct key-value pair to Discord
+        # This will now correctly handle both text and images.
+        Thread(target=self.discord_integrator.send_snippet_to_discord, args=(key, value), daemon=True).start()
 
     def copy_last_item(self):
         item = self.db.conn.execute("SELECT id FROM clipboard WHERE type='text' ORDER BY timestamp DESC LIMIT 1").fetchone()
@@ -389,7 +436,7 @@ class ClipboardApp:
         self.snipping_widget.show()
         
     def take_fullscreen_screenshot(self):
-        relative_path = os.path.join("images", f"ss_fullscreen_{int(time.time() * 1000)}.png")
+        relative_path = os.path.join("images", f"unxss-fullscreen-{int(time.time() * 1000)}.png")
         full_path = os.path.join(USER_DATA_DIR, relative_path)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         with mss.mss() as sct:
@@ -413,7 +460,7 @@ class ClipboardApp:
                     "width": active_window.width, 
                     "height": active_window.height
                 }
-                relative_path = os.path.join("images", f"ss_window_{int(time.time() * 1000)}.png")
+                relative_path = os.path.join("images", f"unxss-window-{int(time.time() * 1000)}.png")
                 full_path = os.path.join(USER_DATA_DIR, relative_path)
                 os.makedirs(os.path.dirname(full_path), exist_ok=True)
                 with mss.mss() as sct:

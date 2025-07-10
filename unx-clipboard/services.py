@@ -358,12 +358,35 @@ class LocalFolderProvider(BaseSyncProvider):
         pass
     def sync(self, force_upload=False):
         """
-        Directly overrides the base sync method for a simple, one-way copy.
+        Directly overrides the base sync method. It now finds the active
+        profile from the list of profiles in the configuration.
         """
-        print("Performing local folder sync...")
-        sync_path = self.config.get('local_sync_path')
+        backend_name = self.config.get('backend', 'None')
+        
+        # Check if a sync was manually triggered without a profile selected
+        if backend_name == "None":
+            message = "No active sync profile selected.\nPlease select a profile on application startup to enable sync."
+            print(message)
+            if force_upload: # Only show this error popup on a manual sync attempt
+                 self.signals.sync_complete.emit(False, message)
+            return
+
+        # Find the active profile from the list by its name
+        profiles = self.full_config.get('sync', {}).get('profiles', [])
+        active_profile = next((p for p in profiles if p.get('name') == backend_name), None)
+        
+        if not active_profile:
+            message = f"Error: Active sync profile '{backend_name}' could not be found in your configuration."
+            print(message)
+            self.signals.sync_complete.emit(False, message)
+            return
+
+        sync_path = active_profile.get('path')
+        retention_count = active_profile.get('retention', 5)
+        print(f"Performing sync for profile '{backend_name}' to path: {sync_path}")
+
         if not sync_path or not os.path.isdir(sync_path):
-            message = f"Local sync path not configured or not found: {sync_path}"
+            message = f"The path for profile '{backend_name}' is not configured or is not a valid directory."
             print(message)
             self.signals.sync_complete.emit(False, message)
             return
@@ -373,20 +396,21 @@ class LocalFolderProvider(BaseSyncProvider):
         destination_file = os.path.join(sync_path, unique_filename)
         
         try:
-            # Create the archive before the try/except to catch its errors separately if needed
             archive_path = self._create_zip_archive()
             shutil.copy(archive_path, destination_file)
-            message = f"Backup successfully copied to:\n{sync_path}"
+            message = f"Backup successfully created for profile '{backend_name}'."
             print(f"Successfully synced backup to {destination_file}")
+            
             self._save_last_sync_info()
-            self._apply_retention_policy(sync_path)
+            self._apply_retention_policy(sync_path, retention_count)
+
+            # Only emit a success signal, the popup is no longer needed
             self.signals.sync_complete.emit(True, message)
         except Exception as e:
-            message = f"Could not copy backup to the specified path:\n{e}"
+            message = f"Could not complete sync for profile '{backend_name}':\n{e}"
             print(f"Error during local folder sync: {e}")
             self.signals.sync_complete.emit(False, message)
         finally:
-            # The cleanup should still happen if archive_path was created
             if 'archive_path' in locals() and os.path.exists(archive_path):
                 self._cleanup_temp_files(archive_path)
 
@@ -457,6 +481,42 @@ class DiscordIntegration:
         self.webhook_url = self.config.get('webhook_url')
         self.text_thread_id = self.config.get('text_thread_id')
         self.image_thread_id = self.config.get('image_thread_id')
+        self.snippet_thread_id = self.config.get('snippet_thread_id')
+
+    def send_snippet_to_discord(self, key, value):
+        """Sends a key-value snippet to the dedicated snippet thread."""
+        if not self.enabled or not self.webhook_url or not self.snippet_thread_id:
+            return
+
+        final_url = f"{self.webhook_url}?thread_id={self.snippet_thread_id}"
+        
+        try:
+            # --- THE CORRECTED LOGIC ---
+            # We check if the BASENAME of the path starts with our unique prefix.
+            # This correctly identifies "images/unxss-region-123.png" as an image.
+            if value and isinstance(value, str) and os.path.basename(value).startswith('unxss-'):
+                # It's an image. Send the key as text and the image as a file.
+                image_path = os.path.join(USER_DATA_DIR, value)
+                if not os.path.exists(image_path):
+                    print(f"DiscordIntegration: Snippet image not found at {image_path}")
+                    return
+                
+                with open(image_path, 'rb') as f:
+                    payload = {'content': f"**{key}**"} # The key is the text part of the message
+                    files = {'file': (os.path.basename(image_path), f)}
+                    response = requests.post(final_url, data=payload, files=files)
+
+            else:
+                # It's text. Send the formatted key-value pair.
+                formatted_content = f"**{key}**:\n```\n{value}\n```"
+                payload = {'content': formatted_content}
+                response = requests.post(final_url, json=payload)
+            # --- END OF CORRECTED LOGIC ---
+
+            response.raise_for_status()
+            print(f"Successfully sent snippet '{key}' to Discord.")
+        except requests.exceptions.RequestException as e:
+            print(f"Error sending snippet to Discord: {e}")
 
     def send_to_discord(self, content, content_type):
         # Determine which thread ID to use

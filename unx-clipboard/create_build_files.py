@@ -33,10 +33,18 @@ else:
     os.makedirs(CONFIG_DIR, exist_ok=True)
     default_config = {
         "history": {"retention_days": 30, "max_entries_display": 500, "log_images": True},
-        "sync": {"auto_sync": False, "backend": "None", "sync_interval_minutes": 15, "onedrive_client_id": "", "google_credentials_path": "credentials.json", "local_sync_path": ""},
+        "sync": {
+            "auto_sync": False,
+            "backend": "None",
+            "sync_interval_minutes": 15,
+            "profiles": [
+                # Example: {"name": "Google Drive", "path": "C:/Path/To/Sync", "retention": 10}
+            ]
+        },
         "hotkey": "<ctrl>+<shift>+v", "snipping_hotkey": "<ctrl>+<shift>+s", "theme": "System",
         "custom_theme": {"background": "#2e3440", "foreground": "#d8dee9", "background_light": "#3b4252", "accent_primary": "#81a1c1", "accent_secondary": "#5e81ac", "font_family": "Segoe UI", "font_size": "10pt"},
-        "notion": {"enabled": False, "api_key": "", "database_id": ""}
+        "notion": {"enabled": False, "api_key": "", "database_id": ""},
+        "discord": {}
     }
     with open(CONFIG_FILE, 'w') as f:
         json.dump(default_config, f, indent=4)

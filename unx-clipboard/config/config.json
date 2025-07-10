@@ -1,14 +1,14 @@
 {
     "history": {
         "retention_days": 30,
-        "max_entries_display": 100,
+        "max_entries_display": 500,
         "log_images": true
     },
     "sync": {
         "auto_sync": false,
         "backend": "None",
         "sync_interval_minutes": 15,
-        "onedrive_client_id": "YOUR_ONEDRIVE_CLIENT_ID_HERE",
+        "onedrive_client_id": "",
         "google_credentials_path": "credentials.json",
         "local_sync_path": ""
     },
@@ -16,19 +16,17 @@
     "snipping_hotkey": "<ctrl>+<shift>+s",
     "theme": "System",
     "custom_theme": {
-        "background": "#000000",
-        "foreground": "#aa0000",
-        "background_light": "#00ffff",
-        "foreground_light": "#55ffff",
-        "accent_primary": "#aa0000",
-        "accent_secondary": "#55ff7f",
-        "accent_danger": "#ff0000",
-        "font_family": "Small Fonts",
-        "font_size": "8pt"
+        "background": "#2e3440",
+        "foreground": "#d8dee9",
+        "background_light": "#3b4252",
+        "accent_primary": "#81a1c1",
+        "accent_secondary": "#5e81ac",
+        "font_family": "Segoe UI",
+        "font_size": "10pt"
     },
     "notion": {
         "enabled": false,
-        "api_key": "YOUR_NOTION_API_KEY",
-        "database_id": "YOUR_NOTION_DATABASE_ID"
+        "api_key": "",
+        "database_id": ""
     }
 }

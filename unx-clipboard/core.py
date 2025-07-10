@@ -40,6 +40,11 @@ class Database:
     def create_table(self):
         with self.conn:
             try:
+                # This will store the 'key' for our key-value snippets
+                self.conn.execute("ALTER TABLE clipboard ADD COLUMN snippet_key TEXT")
+            except sqlite3.OperationalError:
+                pass # Column already exists
+            try:
                 self.conn.execute("ALTER TABLE clipboard ADD COLUMN is_snippet INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass # Column already exists
@@ -73,9 +78,13 @@ class Database:
                 (content, content_type, datetime.now())
             )
 
-    def add_manual_snippet(self, content):
+    def add_manual_snippet(self, key, value):
+        """Adds a new key-value snippet to the database."""
         with self.conn:
-            self.conn.execute("INSERT INTO clipboard (content, type, timestamp, is_snippet) VALUES (?, 'text', ?, 1)", (content, datetime.now()))
+            self.conn.execute(
+                "INSERT INTO clipboard (content, type, timestamp, is_snippet, snippet_key) VALUES (?, 'text', ?, 1, ?)", 
+                (value, datetime.now(), key)
+            )
 
     def get_total_entry_count(self, search_text=""):
         """Gets the total number of entries, optionally filtered by search text."""
@@ -91,11 +100,11 @@ class Database:
 
     def get_all_entries(self, search_text="", page=1, per_page=100):
         """Gets a paginated list of entries from the database."""
-        query = "SELECT id, content, type, timestamp, pinned, is_snippet FROM clipboard"
+        query = "SELECT id, content, type, timestamp, pinned, is_snippet, snippet_key FROM clipboard"
         params = []
         if search_text:
-            query += " WHERE content LIKE ?"
-            params.append(f"%{search_text}%")
+            query += " WHERE content LIKE ? OR snippet_key LIKE ?"
+            params.extend([f"%{search_text}%", f"%{search_text}%"])
         
         query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
         
@@ -112,9 +121,13 @@ class Database:
             current_status = cursor.fetchone()[0]
             self.conn.execute("UPDATE clipboard SET pinned = ? WHERE id = ?", (1 - current_status, entry_id))
 
-    def set_as_snippet(self, entry_id):
+    def set_as_snippet(self, entry_id, key):
+        """Sets an existing item as a snippet with a given key."""
         with self.conn:
-            self.conn.execute("UPDATE clipboard SET is_snippet = 1 WHERE id = ?", (entry_id,))
+            self.conn.execute(
+                "UPDATE clipboard SET is_snippet = 1, snippet_key = ? WHERE id = ?", 
+                (key, entry_id)
+            )
 
     def remove_from_snippet(self, entry_id):
         with self.conn:
@@ -202,7 +215,7 @@ class ClipboardMonitor(QObject):
                         self._last_image_hash = current_image_hash
                         self._last_text = ""
                         
-                        relative_path = os.path.join("images", f"img_{int(time.time() * 1000)}.png")
+                        relative_path = os.path.join("images", f"unxss-copied-{int(time.time() * 1000)}.png")
                         full_path = os.path.join(self.image_dir, os.path.basename(relative_path))
                         os.makedirs(os.path.dirname(full_path), exist_ok=True)
                         q_image.save(full_path, "PNG")
